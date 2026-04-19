@@ -1,102 +1,83 @@
-/*
- * ESP32-S3 ADC Example using ESP-IDF low-level driver with calibration
- * Platform: ESP32-S3-DevKitC-1 | Framework: Arduino (PlatformIO)
- * Serial output: 1,000,000 baud
- *
- * WHY NOT analogRead()?
- * Arduino's analogRead() is convenient but adds significant overhead: it
- * reconfigures the ADC on every call and uses a generic wrapper that is
- * noticeably slower than direct register access. For any application that
- * needs high sample rates, bypassing the Arduino layer is worthwhile.
- *
- * THE LOW-LEVEL DRIVER: driver/adc.h
- * ESP-IDF exposes adc1_get_raw() which reads ADC1 directly without
- * reinitialising the peripheral each time. Setup is done once in setup():
- *   - adc1_config_width()         sets the bit resolution (12-bit = 0..4095)
- *   - adc1_config_channel_atten() sets the input attenuation
- * After that, adc1_get_raw() in the loop is a bare hardware read.
- *
- * PIN CHOICE: GPIO 3 = ADC1 channel 2
- * The ESP32-S3 has two ADC units. ADC1 (GPIO 1-10) is preferred because
- * ADC2 cannot be used while Wi-Fi is active. GPIO 3 / ADC1_CH2 was chosen
- * here because it is physically close to the 3.3 V and GND pins on the
- * DevKitC-1 header, making wiring convenient.
- *
- * ATTENUATION: ADC_ATTEN_DB_12
- * The ESP32-S3 ADC input range depends on the attenuation setting:
- *   0 dB  -> ~0..950 mV
- *   2.5 dB-> ~0..1250 mV
- *   6 dB  -> ~0..1750 mV
- *   12 dB -> ~0..3100 mV  (covers the full 3.3 V supply)
- * DB_12 is used here to cover the full 0-3.3 V range.
- *
- * CALIBRATION: esp_adc_cal
- * The ESP32 ADC is non-linear and varies between chips. Espressif stores
- * per-chip calibration data in eFuse during factory programming.
- * esp_adc_cal_characterize() reads that data and builds a correction curve.
- * esp_adc_cal_raw_to_voltage() then converts a raw 12-bit value to a
- * calibrated millivolt reading, which is significantly more accurate than
- * the naive linear formula (raw * 3300 / 4095).
- *
- * SERIAL SPEED: 1,000,000 baud
- * At default 115200 baud, Serial.println() becomes the bottleneck at high
- * sample rates (the TX buffer fills faster than bytes are sent). Running at
- * 1 Mbaud allows ~100,000 bytes/sec, enough to stream ~20,000 text-format
- * samples per second before serial becomes the limiting factor again.
- */
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/uart.h"
+#include "esp_adc/adc_continuous.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 
-// #include <PL_ADXL355.h>
-#include <Arduino.h>
-#include "driver/adc.h"
-#include "esp_adc_cal.h"
+#define ADC_UNIT        ADC_UNIT_1
+#define ADC_CHANNEL     ADC_CHANNEL_2   // GPIO 3
+#define ADC_ATTEN_CFG   ADC_ATTEN_DB_12
+#define SAMPLE_FREQ_HZ  83333           // max for ESP32-S3
 
-//==============================================================================
+// 256 samples per DMA frame (each result is 4 bytes on ESP32-S3)
+#define SAMPLES_PER_FRAME   256
+#define FRAME_SIZE          (SAMPLES_PER_FRAME * SOC_ADC_DIGI_RESULT_BYTES)
 
-// Using default ESP32-S3 SPI2 (FSPI) pins (reserved for ADXL355, inactive)
-// ADXL355   GPIO
-// CS          10
-// MOSI        11
-// SCLK        12
-// MISO        13
+static adc_continuous_handle_t adc_handle;
+static adc_cali_handle_t       cali_handle;
 
-// #define SPI_CS_PIN    10
-#define ADC_PIN        3   // ADC1 channel 2, free from SPI
-#define ADC_CHANNEL    ADC1_CHANNEL_2
-#define ADC_ATTEN_CFG  ADC_ATTEN_DB_12
-#define ADC_WIDTH_CFG  ADC_WIDTH_BIT_12
+static void adc_init(void) {
+    adc_continuous_handle_cfg_t handle_cfg = {
+        .max_store_buf_size = FRAME_SIZE * 4,
+        .conv_frame_size    = FRAME_SIZE,
+        .flags              = {},
+    };
+    ESP_ERROR_CHECK(adc_continuous_new_handle(&handle_cfg, &adc_handle));
 
-// PL::ADXL355 adxl355;
+    adc_digi_pattern_config_t pattern = {
+        .atten     = ADC_ATTEN_DB_12,
+        .channel   = ADC_CHANNEL_2,
+        .unit      = ADC_UNIT_1,
+        .bit_width = ADC_BITWIDTH_12,
+    };
 
-static esp_adc_cal_characteristics_t adcChars;
+    adc_continuous_config_t cfg = {
+        .pattern_num    = 1,
+        .adc_pattern    = &pattern,
+        .sample_freq_hz = SAMPLE_FREQ_HZ,
+        .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
+        .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2,
+    };
+    ESP_ERROR_CHECK(adc_continuous_config(adc_handle, &cfg));
 
-//==============================================================================
+    adc_cali_curve_fitting_config_t cali_cfg = {
+        .unit_id  = ADC_UNIT,
+        .chan     = ADC_CHANNEL,
+        .atten   = ADC_ATTEN_CFG,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&cali_cfg, &cali_handle));
 
-void setup() {
-  Serial.begin(1000000);
-  while (!Serial);
-
-  // adxl355.beginSPI(SPI_CS_PIN);
-  // adxl355.reset();
-  // delay(1000);
-  // adxl355.setRange(PL::ADXL355_Range::range2g);
-  // adxl355.enableMeasurement();
-
-  adc1_config_width(ADC_WIDTH_CFG);
-  adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_CFG);
-  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_CFG, ADC_WIDTH_CFG, 1100, &adcChars);
-
-  Serial.println("ADC (mV)");
+    ESP_ERROR_CHECK(adc_continuous_start(adc_handle));
 }
 
-//==============================================================================
+extern "C" void app_main(void) {
+    uart_set_baudrate(UART_NUM_0, 1000000);
+    adc_init();
 
-void loop() {
-  // auto a = adxl355.getAccelerations();
-  uint32_t raw = adc1_get_raw(ADC_CHANNEL);
-  uint32_t mv  = esp_adc_cal_raw_to_voltage(raw, &adcChars);
+    printf("ADC (mV)\n");
 
-  // Serial.print(a.x, 6); Serial.print(", ");
-  // Serial.print(a.y, 6); Serial.print(", ");
-  // Serial.print(a.z, 6); Serial.print(", ");
-  Serial.println(mv);
+    static uint8_t  buf[FRAME_SIZE];
+    static uint32_t acc   = 0;
+    static uint32_t count = 0;
+
+    while (1) {
+        uint32_t out_len = 0;
+        esp_err_t ret = adc_continuous_read(adc_handle, buf, FRAME_SIZE, &out_len, portMAX_DELAY);
+        if (ret != ESP_OK) continue;
+
+        for (uint32_t i = 0; i < out_len; i += SOC_ADC_DIGI_RESULT_BYTES) {
+            adc_digi_output_data_t *d = (adc_digi_output_data_t *)&buf[i];
+            int mv = 0;
+            adc_cali_raw_to_voltage(cali_handle, d->type2.data, &mv);
+            acc += (uint32_t)mv;
+            if (++count == 5) {
+                printf("%lu\n", acc / 5);
+                acc   = 0;
+                count = 0;
+            }
+        }
+    }
 }
