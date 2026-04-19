@@ -1,4 +1,9 @@
 /*
+now using freetros , + 5 times oversampling  ==>16.6 Khz signal output (83 lHz measurement)
+
+
+
+
  * ESP32-S3 ADC Example using ESP-IDF low-level driver with calibration
  * Platform: ESP32-S3-DevKitC-1 | Framework: Arduino (PlatformIO)
  * Serial output: 1,000,000 baud
