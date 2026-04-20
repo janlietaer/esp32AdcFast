@@ -1,12 +1,12 @@
-# ESP32-S3 Fast ADC — 83 kHz continuous DMA with calibration
+# ESP32-S3 Fast ADC — **83 kHz** continuous DMA with calibration
 
-Read your analog signal at **83,333 samples/second** on an ESP32-S3, stream calibrated millivolt values over serial at 1 Mbaud, and still have the CPU nearly idle. No RTOS tricks, no bitbanging — just the ESP-IDF continuous ADC driver doing DMA transfers in the background while your code sleeps.
+Read your analog signal at **83,333 samples/second** (that's 83 *kilo*hertz, not 83 Hz) on an ESP32-S3, stream calibrated millivolt values over serial at 1 Mbaud, and still have the CPU nearly idle. No RTOS tricks, no bitbanging — just the ESP-IDF continuous ADC driver doing DMA transfers in the background while your code sleeps.
 
 ## What you get
 
 | Feature | Value |
 |---|---|
-| Sample rate | 83,333 Hz (hardware max on ESP32-S3) |
+| Sample rate | **83,333 Hz = 83 kHz** (hardware max on ESP32-S3) |
 | Output rate | ~16,667 values/sec (5× oversampled) |
 | Resolution | 12-bit ADC, calibrated to mV via eFuse curve fitting |
 | Input range | 0–3.1 V (`ADC_ATTEN_DB_12`) |
